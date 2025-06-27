@@ -1,6 +1,7 @@
 """Main git squash tool implementation."""
 
 import logging
+import asyncio
 from typing import List, Optional
 from .core.config import GitSquashConfig
 from .core.types import (
@@ -27,22 +28,29 @@ class GitSquashTool:
         self.analyzer = DiffAnalyzer(config)
         self.formatter = MessageFormatter(config)
     
-    def prepare_squash_plan(self, start_date: Optional[str] = None) -> SquashPlan:
+    async def prepare_squash_plan(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> SquashPlan:
         """Prepare a complete squash plan."""
-        logger.info("Preparing squash plan (start_date=%s)", start_date)
+        logger.info("Preparing squash plan (start_date=%s, end_date=%s)", start_date, end_date)
         
         # Get commits grouped by date
         commits_by_date = self.git_ops.get_commits_by_date()
         
-        # Filter by start date if provided
-        if start_date:
-            commits_by_date = {
-                date: commits for date, commits in commits_by_date.items()
-                if date >= start_date
-            }
+        # Filter by date range if provided
+        if start_date or end_date:
+            filtered_commits = {}
+            for date, commits in commits_by_date.items():
+                include_date = True
+                if start_date and date < start_date:
+                    include_date = False
+                if end_date and date > end_date:
+                    include_date = False
+                if include_date:
+                    filtered_commits[date] = commits
+            commits_by_date = filtered_commits
             
             if not commits_by_date:
-                raise InvalidDateRangeError(f"No commits found after {start_date}")
+                date_range = f"between {start_date or 'beginning'} and {end_date or 'HEAD'}"
+                raise InvalidDateRangeError(f"No commits found {date_range}")
         
         if not commits_by_date:
             raise NoCommitsFoundError("No commits found to squash")
@@ -58,7 +66,7 @@ class GitSquashTool:
             logger.info("Processing %s: %d commits", date, len(commits))
             
             # Try to create summary for all commits in the day
-            day_items = self._process_day_commits(date, commits)
+            day_items = await self._process_day_commits(date, commits)
             plan_items.extend(day_items)
         
         plan = SquashPlan(
@@ -165,16 +173,42 @@ class GitSquashTool:
         
         logger.info("Squash execution complete!")
     
-    def suggest_branch_name(self, plan: SquashPlan) -> str:
+    async def suggest_branch_name(self, plan: SquashPlan) -> str:
         """Suggest a branch name based on the squash plan."""
         summaries = [item.summary for item in plan.items]
-        suffix = self.ai_client.suggest_branch_name(summaries)
-        return f"{self.config.default_branch_prefix}{suffix}"
+        suffix = await self.ai_client.suggest_branch_name(summaries)
+        return f"{self.config.branch_prefix}{suffix}"
     
-    def _process_day_commits(self, date: str, commits: List[CommitInfo]) -> List[SquashPlanItem]:
+    async def _process_day_commits(self, date: str, commits: List[CommitInfo], depth: int = 0) -> List[SquashPlanItem]:
         """Process commits for a single day, splitting if necessary."""
+        # Prevent infinite recursion
+        MAX_RECURSION_DEPTH = 10
+        if depth > MAX_RECURSION_DEPTH:
+            logger.warning("Maximum recursion depth reached for date %s with %d commits", date, len(commits))
+            # Create basic summary without AI generation to avoid further recursion
+            analysis = self._analyze_commits(commits)
+            return [SquashPlanItem(
+                date=date,
+                commits=commits,
+                summary=f"Update {date} ({len(commits)} commits)",
+                analysis=analysis
+            )]
+        
+        # For single commits, still generate summary to improve the message
+        if len(commits) <= 1:
+            logger.debug("Processing single commit for date %s", date)
+            # Still generate a summary to improve the original commit message
+            summary = await self._generate_summary_with_retry(date, commits)
+            analysis = self._analyze_commits(commits)
+            return [SquashPlanItem(
+                date=date,
+                commits=commits,
+                summary=summary,
+                analysis=analysis
+            )]
+        
         # Try to create a single summary for all commits
-        summary = self._generate_summary_with_retry(date, commits)
+        summary = await self._generate_summary_with_retry(date, commits)
         
         # Check if summary fits within limits
         if len(summary) <= self.config.total_message_limit:
@@ -189,14 +223,15 @@ class GitSquashTool:
         
         # Need to split the day
         logger.info("Summary too long (%d chars), splitting day", len(summary))
-        return self._split_day_commits(date, commits)
+        return await self._split_day_commits(date, commits)
     
-    def _split_day_commits(self, date: str, commits: List[CommitInfo]) -> List[SquashPlanItem]:
+    async def _split_day_commits(self, date: str, commits: List[CommitInfo]) -> List[SquashPlanItem]:
         """Split day's commits into multiple groups."""
         if len(commits) == 1:
-            # Can't split further - use truncated summary
+            # Can't split further - generate the best summary possible
+            summary = await self._generate_summary_with_retry(date, commits)
             analysis = self._analyze_commits(commits)
-            summary = self._generate_summary_with_retry(date, commits)
+            
             # Truncate if still too long
             if len(summary) > self.config.total_message_limit:
                 lines = summary.split('\n')
@@ -226,8 +261,8 @@ class GitSquashTool:
         
         # Recursively process each half
         result = []
-        result.extend(self._process_day_commits(date, first_half))
-        result.extend(self._process_day_commits(date, second_half))
+        result.extend(await self._process_day_commits(date, first_half, depth + 1))
+        result.extend(await self._process_day_commits(date, second_half, depth + 1))
         
         # Add part numbers
         for i, item in enumerate(result, 1):
@@ -236,17 +271,23 @@ class GitSquashTool:
         
         return result
     
-    def _generate_summary_with_retry(self, date: str, commits: List[CommitInfo]) -> str:
+    async def _generate_summary_with_retry(self, date: str, commits: List[CommitInfo]) -> str:
         """Generate summary with retry logic."""
         analysis = self._analyze_commits(commits)
         subjects = [c.subject for c in commits]
         
+        # Get the actual diff content for this range
+        start_commit = commits[0].hash
+        end_commit = commits[-1].hash
+        diff_content = self.git_ops.get_diff(start_commit, end_commit)
+        
         summary = None
         for attempt in range(1, self.config.max_retry_attempts + 1):
-            summary = self.ai_client.generate_summary(
+            summary = await self.ai_client.generate_summary(
                 date=date,
                 analysis=analysis,
                 commit_subjects=subjects,
+                diff_content=diff_content,
                 attempt=attempt,
                 previous_summary=summary
             )

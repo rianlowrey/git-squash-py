@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 import os
+import asyncio
 from typing import Optional
 
 from .core.config import GitSquashConfig
@@ -42,6 +43,7 @@ Examples:
   %(prog)s --dry-run                    # Show plan without executing
   %(prog)s --execute                    # Execute squashing  
   %(prog)s --start-date 2024-01-15      # Squash from specific date
+  %(prog)s --start-date 2024-01-15 --end-date 2024-01-20  # Squash date range
   %(prog)s --message-limit 600          # Custom message length limit
   %(prog)s --test-mode                  # Use mock AI for testing
 
@@ -54,6 +56,12 @@ Environment Variables:
     parser.add_argument(
         '--start-date',
         help='Start date for squashing (YYYY-MM-DD)',
+        metavar='DATE'
+    )
+    
+    parser.add_argument(
+        '--end-date',
+        help='End date for squashing (YYYY-MM-DD, defaults to HEAD)',
         metavar='DATE'
     )
     
@@ -95,8 +103,8 @@ Environment Variables:
     )
     
     ai_group.add_argument(
-        '--claude-model',
-        default='claude-3-haiku-20240307',
+        '--model',
+        default='claude-3-7-sonnet-20250219',
         help='Claude model to use (default: %(default)s)',
         metavar='MODEL'
     )
@@ -204,13 +212,14 @@ def confirm_execution() -> bool:
             print("Please enter 'y' or 'n'")
 
 
-def main(args: Optional[list] = None) -> int:
-    """Main entry point for the CLI."""
+async def async_main(args: Optional[list] = None) -> int:
+    """Async main entry point for the CLI."""
     parser = create_argument_parser()
     parsed_args = parser.parse_args(args)
     
     # Setup logging
-    verbose = parsed_args.verbose or os.environ.get('GIT_SQUASH_VERBOSE')
+    env_verbose = bool(os.environ.get('GIT_SQUASH_VERBOSE', ""))
+    verbose = parsed_args.verbose or env_verbose
     setup_logging(verbose)
     
     try:
@@ -228,7 +237,7 @@ def main(args: Optional[list] = None) -> int:
         
         # Prepare plan
         logger.info("Analyzing commits...")
-        plan = tool.prepare_squash_plan(parsed_args.start_date)
+        plan = await tool.prepare_squash_plan(parsed_args.start_date, parsed_args.end_date)
         
         # Display plan
         display_plan(plan)
@@ -244,7 +253,7 @@ def main(args: Optional[list] = None) -> int:
                 return 0
             
             # Generate branch name
-            branch_name = tool.suggest_branch_name(plan)
+            branch_name = await tool.suggest_branch_name(plan)
             logger.info("Creating branch: %s", branch_name)
             
             # Create backup unless disabled
@@ -285,6 +294,11 @@ def main(args: Optional[list] = None) -> int:
         logger.exception("Unexpected error: %s", e)
         print(f"Unexpected error: {e}", file=sys.stderr)
         return 1
+
+
+def main(args: Optional[list] = None) -> int:
+    """Main entry point for the CLI."""
+    return asyncio.run(async_main(args))
 
 
 if __name__ == '__main__':

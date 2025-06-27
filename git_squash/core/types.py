@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+import importlib.util
 from typing import List, Optional, Dict
 from enum import Enum
 
@@ -132,3 +133,9 @@ class CommitAnalysisError(GitSquashError):
 class GitOperationError(GitSquashError):
     """Raised when git operations fail."""
     pass
+
+
+def can_import(module_name: str) -> bool:
+    """Checks if a module can be imported without actually importing it."""
+    spec = importlib.util.find_spec(module_name)
+    return spec is not None

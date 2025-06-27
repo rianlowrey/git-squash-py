@@ -2,8 +2,9 @@
 
 import pytest
 import sys
+import asyncio
 from io import StringIO
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from git_squash.cli import (
     create_argument_parser, validate_environment, create_ai_client,
     display_plan, confirm_execution, main
@@ -23,7 +24,7 @@ class TestArgumentParser:
         
         assert args.message_limit == 800
         assert args.branch_prefix == "feature/"
-        assert args.claude_model == "claude-3-haiku-20240307"
+        assert args.model == "claude-3-7-sonnet-20250219"
         assert args.dry_run is False
         assert args.execute is False
         assert args.test_mode is False
@@ -214,7 +215,9 @@ class TestMainFunction:
         mock_plan = Mock()
         mock_plan.items = []
         mock_plan.summary_stats.return_value = "0 commits → 0 squashed commits"
-        mock_tool.prepare_squash_plan.return_value = mock_plan
+        
+        # Make prepare_squash_plan async
+        mock_tool.prepare_squash_plan = AsyncMock(return_value=mock_plan)
         
         # Run main
         result = main(['--dry-run'])
@@ -244,8 +247,10 @@ class TestMainFunction:
         mock_plan = Mock()
         mock_plan.items = []
         mock_plan.summary_stats.return_value = "0 commits → 0 squashed commits"
-        mock_tool.prepare_squash_plan.return_value = mock_plan
-        mock_tool.suggest_branch_name.return_value = "feature/test"
+        
+        # Make async methods
+        mock_tool.prepare_squash_plan = AsyncMock(return_value=mock_plan)
+        mock_tool.suggest_branch_name = AsyncMock(return_value="feature/test")
         
         # Run main
         result = main(['--execute'])
@@ -274,7 +279,9 @@ class TestMainFunction:
         mock_plan = Mock()
         mock_plan.items = []
         mock_plan.summary_stats.return_value = "0 commits → 0 squashed commits"
-        mock_tool.prepare_squash_plan.return_value = mock_plan
+        
+        # Make prepare_squash_plan async
+        mock_tool.prepare_squash_plan = AsyncMock(return_value=mock_plan)
         
         # Run main
         result = main(['--execute'])
