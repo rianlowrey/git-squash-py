@@ -2,11 +2,11 @@
 
 import logging
 import asyncio
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from .core.config import GitSquashConfig
 from .core.types import (
     CommitInfo, SquashPlan, SquashPlanItem, 
-    NoCommitsFoundError, InvalidDateRangeError
+    NoCommitsFoundError, InvalidDateRangeError, GitOperationError
 )
 from .core.analyzer import DiffAnalyzer, MessageFormatter
 from .git.operations import GitOperations
@@ -55,6 +55,24 @@ class GitSquashTool:
         if not commits_by_date:
             raise NoCommitsFoundError("No commits found to squash")
         
+        # Collect all commits for cache key
+        all_commits = []
+        for commits in commits_by_date.values():
+            all_commits.extend(commits)
+        
+        # Check if we have a cached plan (if AI client supports caching)
+        if hasattr(self.ai_client, 'cache'):
+            cached_plan_data = self.ai_client.cache.get_plan(
+                start_date, end_date, all_commits, self.config
+            )
+            
+            if cached_plan_data:
+                logger.info("Using cached squash plan")
+                # Reconstruct plan from cached data
+                plan = self._reconstruct_plan_from_cache(cached_plan_data, commits_by_date)
+                if plan:
+                    return plan
+        
         # Process each day
         plan_items = []
         total_commits = 0
@@ -75,19 +93,25 @@ class GitSquashTool:
             config=self.config
         )
         
+        # Cache the plan (if AI client supports caching)
+        if hasattr(self.ai_client, 'cache'):
+            self.ai_client.cache.set_plan(
+                start_date, end_date, all_commits, self.config, plan
+            )
+        
         logger.info("Plan complete: %s", plan.summary_stats())
         return plan
     
-    def execute_squash_plan(self, plan: SquashPlan, target_branch: str) -> None:
-        """Execute a squash plan."""
-        logger.info("Executing squash plan on branch: %s", target_branch)
+    def execute_squash_plan(self, plan: SquashPlan, target_branch: str, base_branch: str = "main") -> None:
+        """Execute a squash plan and invalidate cache."""
+        logger.info("Executing squash plan on branch: %s from base: %s", target_branch, base_branch)
         
         # Create backup
         backup_branch = self.git_ops.create_backup_branch()
         logger.info("Created backup: %s", backup_branch)
         
-        # Create target branch
-        self.git_ops.create_branch(target_branch)
+        # Create target branch from base branch to ensure mergeable commits
+        self.git_ops.create_branch(target_branch, base_branch)
         
         # Get parent of first commit to reset to
         first_item = plan.items[0]
@@ -112,8 +136,17 @@ class GitSquashTool:
         except Exception as e:
             logger.warning("Could not determine parent commit: %s", e)
         
+        # Get the base branch HEAD to use as parent for first commit
+        try:
+            base_head_result = self.git_ops._run_git_command(["rev-parse", base_branch])
+            base_head = base_head_result.stdout.strip()
+            logger.debug("Base branch %s is at commit %s", base_branch, base_head[:8])
+        except Exception as e:
+            logger.error("Cannot resolve base branch %s: %s", base_branch, e)
+            raise GitOperationError(f"Cannot resolve base branch '{base_branch}': {e}")
+
         # Apply each squashed commit
-        current_parent = None
+        current_parent = None  # Will be determined based on original ancestry
         for i, item in enumerate(plan.items):
             logger.info("Creating commit %d/%d: %s", i+1, len(plan.items), item.display_name)
             
@@ -122,54 +155,59 @@ class GitSquashTool:
             
             # Get parent for this commit
             if current_parent is None:
-                # First commit - try to get parent of original first commit
+                # First commit - check if original had a parent
                 try:
                     parent_result = self.git_ops._run_git_command(
                         ["rev-parse", f"{first_commit}^"],
                         check=False
                     )
                     if parent_result.returncode == 0:
-                        current_parent = parent_result.stdout.strip()
+                        original_parent = parent_result.stdout.strip()
+
+                        # Check if the original parent is reachable from base branch
+                        # This prevents issues with incremental squashing where the parent was squashed away
+                        merge_base_result = self.git_ops._run_git_command(
+                            ["merge-base", "--is-ancestor", original_parent, base_head],
+                            check=False
+                        )
+
+                        if merge_base_result.returncode == 0:
+                            # Original parent is an ancestor of base branch - safe to preserve ancestry
+                            current_parent = original_parent
+                            logger.debug("Preserving original ancestry, parent: %s", current_parent[:8])
+                        else:
+                            # Original parent is not in base branch history (likely squashed) - use base head
+                            current_parent = base_head
+                            logger.info("Original parent not in base branch, using base branch %s at %s", base_branch, base_head[:8])
                     else:
-                        # No parent - this will be root commit
-                        current_parent = None
-                except:
-                    current_parent = None
+                        # Original was root commit - graft onto base branch instead of creating orphan
+                        current_parent = base_head
+                        logger.info("Grafting root commit onto base branch %s at %s", base_branch, base_head[:8])
+                except Exception as e:
+                    # Fallback to base branch HEAD to ensure mergeability
+                    current_parent = base_head
+                    logger.warning("Could not determine original parent, using base branch: %s", e)
             
-            # Create the commit
-            if current_parent:
-                author_name, author_email, author_date = item.author_info
-                new_commit = self.git_ops.create_commit(
-                    message=item.summary,
-                    tree_hash=tree_hash,
-                    parent_hash=current_parent,
-                    author_name=author_name,
-                    author_email=author_email,
-                    author_date=author_date
-                )
-            else:
-                # Root commit case - handle differently
-                logger.info("Creating root commit")
-                # For root commits, we need to use commit-tree without parent
-                import os
-                env = os.environ.copy()
-                author_name, author_email, author_date = item.author_info
-                env.update({
-                    'GIT_AUTHOR_NAME': author_name,
-                    'GIT_AUTHOR_EMAIL': author_email,
-                    'GIT_AUTHOR_DATE': author_date
-                })
-                
-                result = self.git_ops._run_git_command([
-                    "commit-tree", tree_hash, "-m", item.summary
-                ])
-                new_commit = result.stdout.strip()
+            # Create the commit (we always have a valid parent now)
+            author_name, author_email, author_date = item.author_info
+            new_commit = self.git_ops.create_commit(
+                message=item.summary,
+                tree_hash=tree_hash,
+                parent_hash=current_parent,
+                author_name=author_name,
+                author_email=author_email,
+                author_date=author_date
+            )
             
             # Update HEAD and set up for next iteration
             self.git_ops.update_head(new_commit)
             current_parent = new_commit
             
             logger.debug("Created commit %s", new_commit[:8])
+        
+        # Invalidate plan cache after successful execution
+        if hasattr(self.ai_client, 'invalidate_plan_cache'):
+            self.ai_client.invalidate_plan_cache(plan)
         
         logger.info("Squash execution complete!")
     
@@ -272,7 +310,7 @@ class GitSquashTool:
         return result
     
     async def _generate_summary_with_retry(self, date: str, commits: List[CommitInfo]) -> str:
-        """Generate summary with retry logic."""
+        """Generate summary with retry logic and caching."""
         analysis = self._analyze_commits(commits)
         subjects = [c.subject for c in commits]
         
@@ -283,14 +321,29 @@ class GitSquashTool:
         
         summary = None
         for attempt in range(1, self.config.max_retry_attempts + 1):
-            summary = await self.ai_client.generate_summary(
-                date=date,
-                analysis=analysis,
-                commit_subjects=subjects,
-                diff_content=diff_content,
-                attempt=attempt,
-                previous_summary=summary
-            )
+            # Pass commits for caching support
+            if hasattr(self.ai_client.generate_summary, '__code__') and \
+               'commits' in self.ai_client.generate_summary.__code__.co_varnames:
+                # New interface with commits parameter
+                summary = await self.ai_client.generate_summary(
+                    date=date,
+                    analysis=analysis,
+                    commit_subjects=subjects,
+                    diff_content=diff_content,
+                    attempt=attempt,
+                    previous_summary=summary,
+                    commits=commits  # Pass for caching
+                )
+            else:
+                # Old interface without commits parameter
+                summary = await self.ai_client.generate_summary(
+                    date=date,
+                    analysis=analysis,
+                    commit_subjects=subjects,
+                    diff_content=diff_content,
+                    attempt=attempt,
+                    previous_summary=summary
+                )
             
             if len(summary) <= self.config.total_message_limit:
                 return summary
@@ -325,3 +378,57 @@ class GitSquashTool:
         # Analyze the changes
         analysis = self.analyzer.analyze_changes(commits, diff_text, diff_stats)
         return analysis
+    
+    def _reconstruct_plan_from_cache(
+        self, 
+        cached_data: Dict[str, Any], 
+        commits_by_date: Dict[str, List[CommitInfo]]
+    ) -> Optional[SquashPlan]:
+        """Reconstruct a SquashPlan from cached data."""
+        try:
+            plan_items = []
+            
+            for item_data in cached_data.get("items", []):
+                date = item_data["date"]
+                
+                # Find the commits for this item
+                item_commits = []
+                commit_hashes = set(item_data.get("commit_hashes", []))
+                
+                # Look through all dates to find matching commits
+                for date_commits in commits_by_date.values():
+                    for commit in date_commits:
+                        if commit.hash in commit_hashes:
+                            item_commits.append(commit)
+                
+                if len(item_commits) == item_data["commit_count"]:
+                    # Sort commits by their order in commit_hashes
+                    hash_order = {h: i for i, h in enumerate(item_data["commit_hashes"])}
+                    item_commits.sort(key=lambda c: hash_order.get(c.hash, float('inf')))
+                    
+                    plan_item = SquashPlanItem(
+                        date=date,
+                        commits=item_commits,
+                        summary=item_data["summary"],
+                        part=item_data.get("part"),
+                        analysis=self._analyze_commits(item_commits)
+                    )
+                    plan_items.append(plan_item)
+                else:
+                    logger.warning("Cache mismatch: expected %d commits, found %d",
+                                 item_data["commit_count"], len(item_commits))
+                    return None
+            
+            if len(plan_items) == len(cached_data.get("items", [])):
+                return SquashPlan(
+                    items=plan_items,
+                    total_original_commits=cached_data["total_original_commits"],
+                    config=self.config
+                )
+            else:
+                logger.warning("Failed to reconstruct all plan items from cache")
+                return None
+                
+        except Exception as e:
+            logger.error("Error reconstructing plan from cache: %s", e)
+            return None

@@ -277,26 +277,26 @@ class MockAIClient(AIClient):
         
         # Check for mocked dependencies
         if analysis.has_mocked_dependencies:
-            notes.append("- NOTE: Implementation uses mocked upstream dependencies")
+            notes.append("- note: Implementation uses mocked upstream dependencies")
         
         # Check for critical changes
         if analysis.has_critical_changes:
-            notes.append("- NOTE: Contains critical stability fixes")
+            notes.append("- note: Contains critical stability fixes")
         
         # Check for incomplete features
         if analysis.has_incomplete_features:
-            notes.append("- NOTE: Contains temporary implementation pending review")
+            notes.append("- note: Contains temporary implementation pending review")
         
         # Check commit subjects for other patterns
         all_subjects = ' '.join(commit_subjects).lower()
         
         if 'todo' in all_subjects or 'fixme' in all_subjects:
-            notes.append("- NOTE: Contains TODO items requiring follow-up")
+            notes.append("- note: Contains TODO items requiring follow-up")
         
         if 'experimental' in all_subjects:
-            notes.append("- NOTE: Includes experimental features for testing")
+            notes.append("- note: Includes experimental features for testing")
         
         if 'breaking' in all_subjects:
-            notes.append("- NOTE: Contains breaking changes to public API")
+            notes.append("- note: Contains breaking changes to public API")
         
         return notes

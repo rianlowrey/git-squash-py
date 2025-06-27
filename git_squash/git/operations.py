@@ -50,7 +50,7 @@ class GitOperations:
         logger.info("Fetching commits from %s to %s", start_commit or "beginning", end_commit)
         
         # Use ASCII unit separator (0x1F) as delimiter - very unlikely to appear in commit messages
-        cmd = ["log", "--reverse", "--pretty=format:%H\x1F%ad\x1F%s\x1F%an\x1F%ae", "--date=iso-strict-local"]
+        cmd = ["log", "--reverse", "--pretty=format:%H\x1F%ad\x1F%s\x1F%an\x1F%ae", "--date=iso-strict"]
         
         if start_commit:
             cmd.append(f"{start_commit}..{end_commit}")
@@ -175,6 +175,23 @@ class GitOperations:
         """Create a new commit with specific metadata."""
         logger.debug("Creating commit with tree %s, parent %s", tree_hash[:8], parent_hash[:8])
         
+        # Convert ISO date format to Git's expected format if needed
+        # Git expects: "2025-06-27 16:20:09 -1000"
+        # We might have: "2025-06-27T16:20:09-10:00"
+        if 'T' in author_date:
+            original_date = author_date
+            # Convert ISO format to Git format
+            date_part, time_part = author_date.split('T')
+            if '+' in time_part or '-' in time_part:
+                # Find the timezone offset
+                for sep in ['+', '-']:
+                    if sep in time_part:
+                        time_only, tz = time_part.split(sep)
+                        # Convert timezone from -10:00 to -1000
+                        tz_formatted = tz.replace(':', '')
+                        author_date = f"{date_part} {time_only} {sep}{tz_formatted}"
+                        logger.debug("Converted date format from %s to %s", original_date, author_date)
+                        break
         # Set environment variables for author info
         env = os.environ.copy()
         env.update({
@@ -183,8 +200,20 @@ class GitOperations:
             'GIT_AUTHOR_DATE': author_date
         })
         
-        # Create the commit
-        cmd = ["commit-tree", tree_hash, "-p", parent_hash, "-m", message]
+        # Build the command
+        cmd = ["commit-tree"]
+
+        # Add GPG signing if configured
+        if self._get_git_config("commit.gpgsign") == "true":
+            signing_key = self._get_git_config("user.signingkey")
+            if signing_key:
+                cmd.append(f"-S{signing_key}")
+            else:
+                cmd.append("-S")
+
+        # Add tree hash, parent, and message
+        cmd.extend([tree_hash, "-p", parent_hash, "-m", message])
+
         result = subprocess.run(
             ["git"] + cmd,
             env=env,
@@ -205,6 +234,13 @@ class GitOperations:
         logger.debug("Updating HEAD to %s", commit_hash[:8])
         self._run_git_command(["reset", "--hard", commit_hash])
     
+    def _get_git_config(self, key: str) -> Optional[str]:
+        """Get a git configuration value."""
+        result = self._run_git_command(["config", "--get", key], check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+
     def get_commit_count(self, ref: str = "HEAD") -> int:
         """Get the number of commits in a ref."""
         result = self._run_git_command(["rev-list", "--count", ref])

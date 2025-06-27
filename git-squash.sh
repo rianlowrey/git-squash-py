@@ -16,14 +16,38 @@ if [ "$USE_TEST_BACKEND" != "1" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
 fi
 
 # Default to dry-run for safety
-DRY_RUN="--dry-run"
+MODE="--dry-run"
 ARGS=""
 
 # Parse arguments
 while [ $# -gt 0 ]; do
     case $1 in
+        --base)
+            if [ -z "$2" ] || [[ "$2" =~ ^- ]]; then
+                echo -e "${RED}Error: --base requires a branch name${NC}" >&2
+                exit 1
+            fi
+
+            # Validate if the branch name
+            if ! git check-ref-format --branch "$2" >/dev/null 2>&1; then
+                echo -e "${RED}Error: '$2' is not a valid branch name.${NC}" >&2
+                exit 1
+            fi
+
+            ARGS="$ARGS --base-branch $(printf '%q' "$2")"
+
+            shift 2
+            ;;
+        --clear-cache)
+            python3 -m git_squash.cli --clear-cache
+            exit $?
+            ;;
+        --cache-stats)
+            python3 -m git_squash.cli --cache-stats
+            exit $?
+            ;;
         --execute|-e)
-            DRY_RUN=""
+            MODE="--execute"
             shift
             ;;
         --help|-h)
@@ -57,6 +81,19 @@ while [ $# -gt 0 ]; do
             ARGS="$ARGS --start-date $(printf '%q' "$2")"
             shift 2
             ;;
+        --to)
+            if [ -z "$2" ] || [[ "$2" =~ ^- ]]; then
+                echo -e "${RED}Error: --to requires a date argument${NC}" >&2
+                exit 1
+            fi
+            # Validate date format (basic YYYY-MM-DD check)
+            if [[ ! "$2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                echo -e "${RED}Error: Date must be in YYYY-MM-DD format${NC}" >&2
+                exit 1
+            fi
+            ARGS="$ARGS --end-date $(printf '%q' "$2")"
+            shift 2
+            ;;
         --limit)
             if [ -z "$2" ] || [[ "$2" =~ ^- ]]; then
                 echo -e "${RED}Error: --limit requires a number argument${NC}" >&2
@@ -88,7 +125,7 @@ echo -e "${GREEN}Git Squash Tool - Focused Summaries${NC}"
 echo "Current branch: $(git branch --show-current)"
 echo "Total commits: $(git rev-list --count HEAD)"
 
-if [ -z "$DRY_RUN" ]; then
+if [ -z "$MODE" ]; then
     echo -e "${YELLOW}Mode: EXECUTE${NC}"
     echo -e "${YELLOW}Warning: This will create a new branch with squashed commits${NC}"
     read -p "Continue? (y/n) " -n 1 -r
@@ -109,8 +146,8 @@ SCRIPT_DIR="$(dirname "$0")"
 # Check if we should use test backend
 if [ "$USE_TEST_BACKEND" = "1" ] || [ -z "$ANTHROPIC_API_KEY" ]; then
     echo -e "${YELLOW}Using test backend (no API key required)${NC}"
-    python3 -m git_squash.cli --test-mode $DRY_RUN $ARGS
+    python3 -m git_squash.cli --test-mode $MODE $ARGS
 else
     # Use real backend
-    python3 -m git_squash.cli $DRY_RUN $ARGS
+    python3 -m git_squash.cli $MODE $ARGS
 fi
