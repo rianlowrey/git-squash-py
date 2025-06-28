@@ -403,6 +403,71 @@ class TestGitSquashTool:
         assert plan.total_original_commits == 3
 
     @pytest.mark.asyncio
+    async def test_prepare_squash_plan_with_combine(self):
+        """Test squash plan with combine flag."""
+        # Test combining all commits
+        plan = await self.tool.prepare_squash_plan(combine=True)
+
+        assert len(plan.items) == 1  # Single combined commit
+        assert plan.total_original_commits == 3
+        assert plan.total_squashed_commits == 1
+
+        combined = plan.items[0]
+        assert combined.date == "2025-01-01 to 2025-01-02"
+        assert len(combined.commits) == 3
+        assert combined.part is None  # Single part
+
+    @pytest.mark.asyncio
+    async def test_prepare_squash_plan_combine_with_date_filter(self):
+        """Test combine flag with date filtering."""
+        # Combine commits from a specific date forward
+        plan = await self.tool.prepare_squash_plan(start_date="2025-01-02", combine=True)
+
+        assert len(plan.items) == 1
+        assert plan.items[0].date == "2025-01-02"  # Single day, so no range
+        assert len(plan.items[0].commits) == 1
+        assert plan.total_original_commits == 1
+
+    @pytest.mark.asyncio
+    async def test_prepare_squash_plan_combine_with_date_range(self):
+        """Test combine flag with date range."""
+        # Combine commits within date range
+        plan = await self.tool.prepare_squash_plan(
+            start_date="2025-01-01",
+            end_date="2025-01-02",
+            combine=True
+        )
+
+        assert len(plan.items) == 1
+        assert plan.items[0].date == "2025-01-01 to 2025-01-02"
+        assert len(plan.items[0].commits) == 3
+        assert plan.total_original_commits == 3
+        assert plan.total_squashed_commits == 1
+
+    @pytest.mark.asyncio
+    async def test_prepare_squash_plan_combine_single_day(self):
+        """Test combine flag when commits are from a single day."""
+        # Create commits from a single day
+        base_date = datetime(2025, 1, 1)
+        single_day_commits = {
+            "2025-01-01": [
+                CommitInfo("hash1", "2025-01-01T10:00:00", "feat: add feature",
+                           "user", "user@example.com", base_date),
+                CommitInfo("hash2", "2025-01-01T11:00:00", "fix: bug fix", "user",
+                           "user@example.com", base_date + timedelta(hours=1)),
+            ]
+        }
+
+        git_ops = MockGitOperations(single_day_commits)
+        tool = GitSquashTool(git_ops, self.ai_client, self.config)
+
+        plan = await tool.prepare_squash_plan(combine=True)
+
+        assert len(plan.items) == 1
+        assert plan.items[0].date == "2025-01-01"  # Single date, not a range
+        assert len(plan.items[0].commits) == 2
+
+    @pytest.mark.asyncio
     async def test_prepare_squash_plan_no_commits(self):
         """Test squash plan with no commits."""
         empty_git_ops = MockGitOperations({})

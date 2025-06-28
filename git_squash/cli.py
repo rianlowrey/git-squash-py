@@ -55,17 +55,23 @@ Environment Variables:
     )
     
     parser.add_argument(
-        '--start-date',
+        '--start-date', '--from',
         help='Start date for squashing (YYYY-MM-DD)',
         metavar='DATE'
     )
     
     parser.add_argument(
-        '--end-date',
+        '--end-date', '--to',
         help='End date for squashing (YYYY-MM-DD, defaults to HEAD)',
         metavar='DATE'
     )
     
+    parser.add_argument(
+        '--combine',
+        action='store_true',
+        help='Combine all commits in the date range into a single commit (default: group by date)'
+    )
+
     parser.add_argument(
         '--message-limit',
         type=int,
@@ -328,7 +334,7 @@ async def async_main(args: Optional[list] = None) -> int:
         
         # Prepare plan
         logger.info("Analyzing commits...")
-        plan = await tool.prepare_squash_plan(parsed_args.start_date, parsed_args.end_date)
+        plan = await tool.prepare_squash_plan(parsed_args.start_date, parsed_args.end_date, parsed_args.combine, parsed_args.base_branch)
         
         # Display plan
         display_plan(plan)

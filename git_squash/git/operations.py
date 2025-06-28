@@ -101,6 +101,10 @@ class GitOperations:
                 logger.warning("Error parsing commit line '%s': %s", line, e)
                 continue
         
+        # Sort commits within each date by their datetime to ensure chronological order
+        for date_key in commits_by_date:
+            commits_by_date[date_key].sort(key=lambda c: c.datetime)
+
         logger.info("Found %d days with commits", len(commits_by_date))
         return commits_by_date
     

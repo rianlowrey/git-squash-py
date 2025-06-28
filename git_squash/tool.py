@@ -28,12 +28,12 @@ class GitSquashTool:
         self.analyzer = DiffAnalyzer(config)
         self.formatter = MessageFormatter(config)
     
-    async def prepare_squash_plan(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> SquashPlan:
+    async def prepare_squash_plan(self, start_date: Optional[str] = None, end_date: Optional[str] = None, combine: bool = False, base_branch: str = "main") -> SquashPlan:
         """Prepare a complete squash plan."""
-        logger.info("Preparing squash plan (start_date=%s, end_date=%s)", start_date, end_date)
+        logger.info("Preparing squash plan (start_date=%s, end_date=%s, combine=%s, base_branch=%s)", start_date, end_date, combine, base_branch)
         
-        # Get commits grouped by date
-        commits_by_date = self.git_ops.get_commits_by_date()
+        # Get commits grouped by date, only including commits not in base branch
+        commits_by_date = self.git_ops.get_commits_by_date(start_commit=base_branch)
         
         # Filter by date range if provided
         if start_date or end_date:
@@ -60,6 +60,10 @@ class GitSquashTool:
         for commits in commits_by_date.values():
             all_commits.extend(commits)
         
+        # Sort all commits chronologically when combining
+        if combine:
+            all_commits.sort(key=lambda c: c.datetime)
+
         # Check if we have a cached plan (if AI client supports caching)
         if hasattr(self.ai_client, 'cache'):
             cached_plan_data = self.ai_client.cache.get_plan(
@@ -73,19 +77,34 @@ class GitSquashTool:
                 if plan:
                     return plan
         
-        # Process each day
+        # Process commits based on combine flag
         plan_items = []
-        total_commits = 0
+        total_commits = sum(len(commits) for commits in commits_by_date.values())
         
-        for date in sorted(commits_by_date.keys()):
-            commits = commits_by_date[date]
-            total_commits += len(commits)
+        if combine:
+            # Combine all commits (filtered or unfiltered) into a single squash
+            logger.info("Combining %d commits into a single commit", total_commits)
             
-            logger.info("Processing %s: %d commits", date, len(commits))
+            # Determine date description for the combined commit
+            dates = sorted(commits_by_date.keys())
+            if len(dates) == 1:
+                combined_date = dates[0]
+            else:
+                combined_date = f"{dates[0]} to {dates[-1]}"
             
-            # Try to create summary for all commits in the day
-            day_items = await self._process_day_commits(date, commits)
-            plan_items.extend(day_items)
+            # Process all commits together
+            combined_items = await self._process_commits(combined_date, all_commits)
+            plan_items.extend(combined_items)
+        else:
+            # Process each day separately (default behavior)
+            for date in sorted(commits_by_date.keys()):
+                commits = commits_by_date[date]
+
+                logger.info("Processing %s: %d commits", date, len(commits))
+
+                # Try to create summary for all commits in the day
+                day_items = await self._process_commits(date, commits)
+                plan_items.extend(day_items)
         
         plan = SquashPlan(
             items=plan_items,
@@ -217,8 +236,8 @@ class GitSquashTool:
         suffix = await self.ai_client.suggest_branch_name(summaries)
         return f"{self.config.branch_prefix}{suffix}"
     
-    async def _process_day_commits(self, date: str, commits: List[CommitInfo], depth: int = 0) -> List[SquashPlanItem]:
-        """Process commits for a single day, splitting if necessary."""
+    async def _process_commits(self, date: str, commits: List[CommitInfo], depth: int = 0) -> List[SquashPlanItem]:
+        """Process commits for a given date or date range, splitting if necessary."""
         # Prevent infinite recursion
         MAX_RECURSION_DEPTH = 10
         if depth > MAX_RECURSION_DEPTH:
@@ -299,8 +318,8 @@ class GitSquashTool:
         
         # Recursively process each half
         result = []
-        result.extend(await self._process_day_commits(date, first_half, depth + 1))
-        result.extend(await self._process_day_commits(date, second_half, depth + 1))
+        result.extend(await self._process_commits(date, first_half, depth + 1))
+        result.extend(await self._process_commits(date, second_half, depth + 1))
         
         # Add part numbers
         for i, item in enumerate(result, 1):
