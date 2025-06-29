@@ -26,6 +26,7 @@ class TestArgumentParser:
         assert args.execute is False
         assert args.test_mode is False
         assert args.verbose is False
+        assert args.combine is False
     
     def test_execute_argument(self):
         """Test --execute argument."""
@@ -67,6 +68,37 @@ class TestArgumentParser:
         args = parser.parse_args(["--test-mode"])
         
         assert args.test_mode is True
+
+    def test_combine_argument(self):
+        """Test --combine argument."""
+        parser = create_argument_parser()
+        args = parser.parse_args(["--combine"])
+
+        assert args.combine is True
+
+    def test_combine_with_date_range(self):
+        """Test --combine with date range arguments."""
+        parser = create_argument_parser()
+        args = parser.parse_args([
+            "--combine",
+            "--start-date", "2024-01-01",
+            "--end-date", "2024-01-31"
+        ])
+
+        assert args.combine is True
+        assert args.start_date == "2024-01-01"
+        assert args.end_date == "2024-01-31"
+
+    def test_date_aliases(self):
+        """Test --from and --to aliases for date arguments."""
+        parser = create_argument_parser()
+        args = parser.parse_args([
+            "--from", "2024-01-01",
+            "--to", "2024-01-31"
+        ])
+
+        assert args.start_date == "2024-01-01"
+        assert args.end_date == "2024-01-31"
 
 
 class TestEnvironmentValidation:
