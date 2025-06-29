@@ -1,16 +1,13 @@
 """Tests for CLI functionality."""
 
 import pytest
-import sys
-import asyncio
-from io import StringIO
-from unittest.mock import Mock, patch, MagicMock, AsyncMock
+from unittest.mock import Mock, patch, AsyncMock
 from git_squash.cli import (
     create_argument_parser, validate_environment, create_ai_client,
     display_plan, confirm_execution, main
 )
 from git_squash.core.config import GitSquashConfig
-from git_squash.core.types import SquashPlan, SquashPlanItem, CommitInfo
+from git_squash.core.types import SquashPlanItem, CommitInfo
 from datetime import datetime
 
 
@@ -120,7 +117,7 @@ class TestAIClientCreation:
         
         client = create_ai_client(args, config)
         
-        mock_claude_class.assert_called_once_with(config=config)
+        mock_claude_class.assert_called_once_with(config=config, cache_dir=None)
         assert client == mock_instance
 
 
@@ -206,6 +203,11 @@ class TestMainFunction:
         mock_git_ops_class.return_value = mock_git_ops
         
         mock_ai_client = Mock()
+        mock_ai_client.get_usage_stats.return_value = {
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'total_requests': 0
+        }
         mock_create_ai.return_value = mock_ai_client
         
         mock_tool = Mock()

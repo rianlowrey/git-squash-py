@@ -1,5 +1,6 @@
 """Core functionality for git squash tool."""
 
+from .cache import GitSquashCache
 from .config import GitSquashConfig
 from .types import (
     CommitInfo, SquashPlan, SquashPlanItem, ChangeAnalysis, CommitCategories,

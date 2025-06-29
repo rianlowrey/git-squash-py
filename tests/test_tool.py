@@ -162,7 +162,7 @@ class TestMessageFormatter:
 
 - This is a very long bullet point that needs wrapping to demonstrate proper formatting
 - Another bullet point
-- NOTE: This is an important note"""
+- note: This is an important note"""
 
         formatted = self.formatter.format_commit_message(raw_message)
 
@@ -231,7 +231,7 @@ class TestMockAIClient:
         assert any(word in subject.lower()
                    for word in ['cache', 'fix', 'implement', 'add', 'update'])
         assert len(subject) <= self.config.subject_line_limit
-        assert "NOTE:" in summary  # Should have note about mocked dependencies
+        assert "note:" in summary  # Should have note about mocked dependencies
 
     @pytest.mark.asyncio
     async def test_suggest_branch_name(self):
@@ -288,6 +288,17 @@ class MockGitOperations(GitOperations):
 
     def create_commit(self, message, tree_hash, parent_hash, author_name, author_email, author_date):
         """Return mock commit hash."""
+        # Store commit details for verification in tests
+        if not hasattr(self, 'created_commits'):
+            self.created_commits = []
+        self.created_commits.append({
+            'message': message,
+            'tree_hash': tree_hash,
+            'parent_hash': parent_hash,
+            'author_name': author_name,
+            'author_email': author_email,
+            'author_date': author_date
+        })
         return f"new-commit-{len(self.created_branches)}"
 
     def update_head(self, commit_hash):
@@ -504,6 +515,166 @@ class TestErrorHandling:
         except Exception:
             # The mock client might not have perfect fallback - that's ok for this test
             pass
+
+
+class TestGitOperationsGPGSigning:
+    """Test GPG signing functionality in GitOperations."""
+
+    @patch('subprocess.run')
+    def test_create_commit_with_gpg_signing(self, mock_run):
+        """Test that GPG signing flags are properly added to commit-tree command."""
+        # Mock successful git commands
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="mock-commit-hash\n",
+            stderr=""
+        )
+
+        with patch.object(GitOperations, '_get_git_config') as mock_config:
+            # Configure GPG signing enabled with specific key
+            def config_side_effect(key):
+                if key == "commit.gpgsign":
+                    return "true"
+                elif key == "user.signingkey":
+                    return "ABC123DEF"
+                return None
+
+            mock_config.side_effect = config_side_effect
+
+            # Create GitOperations instance with patched validation
+            with patch.object(GitOperations, '_validate_git_repository'):
+                git_ops = GitOperations()
+
+                # Create a commit
+                commit_hash = git_ops.create_commit(
+                    message="Test commit",
+                    tree_hash="tree123",
+                    parent_hash="parent456",
+                    author_name="Test User",
+                    author_email="test@example.com",
+                    author_date="2025-01-01T12:00:00+00:00"
+                )
+
+                # Verify the git command was called with correct arguments
+                # The signing flags should come BEFORE the tree hash
+                expected_cmd = [
+                    "git", "commit-tree",
+                    "-SABC123DEF",      # Signing key joined with -S
+                    "tree123",          # Then tree hash
+                    "-p", "parent456",
+                    "-m", "Test commit"
+                ]
+
+                # Find the commit-tree call
+                commit_tree_call = None
+                for call in mock_run.call_args_list:
+                    if "commit-tree" in call[0][0]:
+                        commit_tree_call = call
+                        break
+
+                assert commit_tree_call is not None
+                actual_cmd = commit_tree_call[0][0]
+                assert actual_cmd == expected_cmd
+
+                # Verify environment variables were set
+                env = commit_tree_call[1]['env']
+                assert env['GIT_AUTHOR_NAME'] == "Test User"
+                assert env['GIT_AUTHOR_EMAIL'] == "test@example.com"
+                assert env['GIT_AUTHOR_DATE'] == "2025-01-01 12:00:00 +0000"
+
+    @patch('subprocess.run')
+    def test_create_commit_with_gpg_signing_no_key(self, mock_run):
+        """Test GPG signing with no specific key configured."""
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="mock-commit-hash\n",
+            stderr=""
+        )
+
+        with patch.object(GitOperations, '_get_git_config') as mock_config:
+            # Configure GPG signing enabled but no specific key
+            def config_side_effect(key):
+                if key == "commit.gpgsign":
+                    return "true"
+                elif key == "user.signingkey":
+                    return None
+                return None
+
+            mock_config.side_effect = config_side_effect
+
+            with patch.object(GitOperations, '_validate_git_repository'):
+                git_ops = GitOperations()
+
+                commit_hash = git_ops.create_commit(
+                    message="Test commit",
+                    tree_hash="tree123",
+                    parent_hash="parent456",
+                    author_name="Test User",
+                    author_email="test@example.com",
+                    author_date="2025-01-01T12:00:00"
+                )
+
+                # Should use -S without a key
+                expected_cmd = [
+                    "git", "commit-tree",
+                    "-S",  # Just -S, no key
+                    "tree123",
+                    "-p", "parent456",
+                    "-m", "Test commit"
+                ]
+
+                commit_tree_call = None
+                for call in mock_run.call_args_list:
+                    if "commit-tree" in call[0][0]:
+                        commit_tree_call = call
+                        break
+
+                assert commit_tree_call is not None
+                actual_cmd = commit_tree_call[0][0]
+                assert actual_cmd == expected_cmd
+
+    @patch('subprocess.run')
+    def test_create_commit_without_gpg_signing(self, mock_run):
+        """Test commit creation without GPG signing."""
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="mock-commit-hash\n",
+            stderr=""
+        )
+
+        with patch.object(GitOperations, '_get_git_config') as mock_config:
+            # Configure GPG signing disabled
+            mock_config.return_value = None
+
+            with patch.object(GitOperations, '_validate_git_repository'):
+                git_ops = GitOperations()
+
+                commit_hash = git_ops.create_commit(
+                    message="Test commit",
+                    tree_hash="tree123",
+                    parent_hash="parent456",
+                    author_name="Test User",
+                    author_email="test@example.com",
+                    author_date="2025-01-01T12:00:00"
+                )
+
+                # Should not include -S flag
+                expected_cmd = [
+                    "git", "commit-tree",
+                    "tree123",
+                    "-p", "parent456",
+                    "-m", "Test commit"
+                ]
+
+                commit_tree_call = None
+                for call in mock_run.call_args_list:
+                    if "commit-tree" in call[0][0]:
+                        commit_tree_call = call
+                        break
+
+                assert commit_tree_call is not None
+                actual_cmd = commit_tree_call[0][0]
+                assert actual_cmd == expected_cmd
 
 
 if __name__ == "__main__":

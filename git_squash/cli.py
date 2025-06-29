@@ -1,11 +1,12 @@
 """Command line interface for the git squash tool."""
 
-import argparse
-import logging
-import sys
-import os
-import asyncio
+from pathlib import Path
 from typing import Optional
+import argparse
+import asyncio
+import logging
+import os
+import sys
 
 from .core.config import GitSquashConfig
 from .core.types import GitSquashError, NoCommitsFoundError, InvalidDateRangeError
@@ -80,6 +81,40 @@ Environment Variables:
         metavar='PREFIX'
     )
     
+    # Add cache management group
+    cache_group = parser.add_argument_group('cache management')
+    
+    cache_group.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Clear all cached summaries and plans'
+    )
+    
+    cache_group.add_argument(
+        '--cleanup-cache',
+        action='store_true',
+        help='Remove expired cache entries'
+    )
+    
+    cache_group.add_argument(
+        '--cache-stats',
+        action='store_true',
+        help='Display cache statistics'
+    )
+    
+    cache_group.add_argument(
+        '--cache-dir',
+        type=Path,
+        help='Custom cache directory (default: ~/.cache/git-squash)',
+        metavar='DIR'
+    )
+    
+    cache_group.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Disable caching for this run'
+    )
+
     # Execution control
     execution_group = parser.add_mutually_exclusive_group()
     execution_group.add_argument(
@@ -128,6 +163,13 @@ Environment Variables:
         help='Skip creating backup branch'
     )
     
+    parser.add_argument(
+        '--base-branch',
+        default='main',
+        help='Base branch to create mergeable commits from (default: %(default)s)',
+        metavar='BRANCH'
+    )
+
     return parser
 
 
@@ -139,14 +181,14 @@ def validate_environment(use_test_mode: bool) -> None:
         sys.exit(1)
 
 
-def create_ai_client(args, config: GitSquashConfig):
+def create_ai_client(args, config: GitSquashConfig, cache_dir: Optional[Path] = None):
     """Create appropriate AI client based on arguments."""
     if args.test_mode:
         logger.info("Using mock AI client")
         return MockAIClient(config)
     else:
-        logger.info("Using Claude AI client")
-        return ClaudeClient(config=config)
+        logger.info("Using Claude AI client with caching")
+        return ClaudeClient(config=config, cache_dir=cache_dir)
 
 
 def save_plan_to_file(plan, filename: str) -> None:
@@ -223,6 +265,46 @@ async def async_main(args: Optional[list] = None) -> int:
     setup_logging(verbose)
     
     try:
+        # Handle cache management commands
+        if parsed_args.clear_cache:
+            from git_squash.core.cache import GitSquashCache
+            cache = GitSquashCache(cache_dir=parsed_args.cache_dir)
+            cache.clear_all()
+            print("Cache cleared successfully.")
+            return 0
+        
+        if parsed_args.cleanup_cache:
+            from git_squash.core.cache import GitSquashCache
+            cache = GitSquashCache(cache_dir=parsed_args.cache_dir)
+            cache.clear_expired()
+            stats = cache.get_stats()
+            print(f"Cleaned up expired entries. Current cache size: {stats['total_size_bytes']} bytes")
+            return 0
+        
+        if parsed_args.cache_stats:
+            from git_squash.core.cache import GitSquashCache
+            cache = GitSquashCache(cache_dir=parsed_args.cache_dir)
+            stats = cache.get_stats()
+            
+            print("\nCache Statistics")
+            print("=" * 40)
+            print(f"Cache directory: {stats['cache_dir']}")
+            print(f"Total summaries: {stats['total_summaries']}")
+            print(f"Total plans: {stats['total_plans']}")
+            print(f"Summary cache size: {stats['summary_cache_size_bytes']:,} bytes")
+            print(f"Plan cache size: {stats['plan_cache_size_bytes']:,} bytes")
+            print(f"Total size: {stats['total_size_bytes']:,} bytes")
+            print(f"TTL: {stats['ttl_days']} days")
+            
+            # If using Claude client, show hit rate
+            if not parsed_args.test_mode:
+                # This would need the client instance, simplified here
+                print("\nAPI Statistics")
+                print("=" * 40)
+                print("Run with --dry-run to see cache hit rates")
+            
+            return 0
+
         # Validate environment
         validate_environment(parsed_args.test_mode)
         
@@ -230,9 +312,18 @@ async def async_main(args: Optional[list] = None) -> int:
         config = GitSquashConfig.from_cli_args(parsed_args)
         logger.debug("Configuration: %s", config)
         
+
+        # Create AI client with cache options
+        if parsed_args.no_cache:
+            # Create a temporary cache directory that will be cleared
+            import tempfile
+            cache_dir = Path(tempfile.mkdtemp(prefix="git-squash-temp-"))
+        else:
+            cache_dir = parsed_args.cache_dir
+
         # Create components
         git_ops = GitOperations(config=config)
-        ai_client = create_ai_client(parsed_args, config)
+        ai_client = create_ai_client(parsed_args, config, cache_dir=cache_dir)
         tool = GitSquashTool(git_ops, ai_client, config)
         
         # Prepare plan
@@ -262,7 +353,7 @@ async def async_main(args: Optional[list] = None) -> int:
             
             # Execute squashing
             logger.info("Executing squash plan...")
-            tool.execute_squash_plan(plan, branch_name)
+            tool.execute_squash_plan(plan, branch_name, parsed_args.base_branch)
             
             print(f"\nSuccess! Created branch: {branch_name}")
             print(f"To review: git log --oneline {branch_name}")
@@ -271,6 +362,16 @@ async def async_main(args: Optional[list] = None) -> int:
         else:
             print("\nDry run complete. Use --execute to apply changes.")
         
+        # At the end, show cache statistics if available
+        if hasattr(ai_client, 'get_usage_stats') and not parsed_args.execute:
+            stats = ai_client.get_usage_stats()
+            if stats.get('cache_hits', 0) + stats.get('cache_misses', 0) > 0:
+                print(f"\nCache Statistics:")
+                print(f"  Hits: {stats['cache_hits']}")
+                print(f"  Misses: {stats['cache_misses']}")
+                print(f"  Hit rate: {stats['cache_hit_rate']:.1%}")
+                print(f"  API requests saved: {stats['cache_hits']}")
+
         return 0
         
     except NoCommitsFoundError as e:
