@@ -9,10 +9,11 @@ class AIClient(ABC):
     """Abstract interface for AI providers that generate commit summaries."""
     
     @abstractmethod
-    def generate_summary(self, 
+    async def generate_summary(self, 
                         date: str,
                         analysis: ChangeAnalysis, 
                         commit_subjects: List[str],
+                        diff_content: str = None,
                         attempt: int = 1,
                         previous_summary: str = None) -> str:
         """Generate a commit summary based on analysis and commit information.
@@ -21,6 +22,7 @@ class AIClient(ABC):
             date: The date for this summary (e.g., "2025-06-23")
             analysis: Analysis of the changes being summarized
             commit_subjects: List of original commit subjects
+            diff_content: The actual diff content showing what changed
             attempt: Attempt number (for retry logic)
             previous_summary: Previous summary if this is a retry
             
@@ -30,7 +32,7 @@ class AIClient(ABC):
         pass
     
     @abstractmethod
-    def suggest_branch_name(self, summaries: List[str]) -> str:
+    async def suggest_branch_name(self, summaries: List[str]) -> str:
         """Suggest a branch name based on commit summaries.
         
         Args:

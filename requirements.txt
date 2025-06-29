@@ -1,0 +1,5 @@
+# Claude Code SDK for AI-powered commit summarization
+claude-code-sdk>=0.1.0
+
+# Additional dependencies for async support
+anyio>=3.0.0

@@ -49,7 +49,8 @@ class GitOperations:
         """Get commits grouped by date."""
         logger.info("Fetching commits from %s to %s", start_commit or "beginning", end_commit)
         
-        cmd = ["log", "--reverse", "--pretty=format:%H|%ad|%s|%an|%ae", "--date=iso-strict-local"]
+        # Use ASCII unit separator (0x1F) as delimiter - very unlikely to appear in commit messages
+        cmd = ["log", "--reverse", "--pretty=format:%H\x1F%ad\x1F%s\x1F%an\x1F%ae", "--date=iso-strict-local"]
         
         if start_commit:
             cmd.append(f"{start_commit}..{end_commit}")
@@ -64,13 +65,23 @@ class GitOperations:
                 continue
                 
             try:
-                parts = line.split('|', 4)
+                parts = line.split('\x1F', 4)
                 if len(parts) != 5:
-                    logger.warning("Skipping malformed commit line: %s", line)
+                    logger.warning("Skipping malformed commit line: %s", repr(line))
                     continue
                     
                 hash_id, date_str, subject, author_name, author_email = parts
-                date_obj = datetime.fromisoformat(date_str.replace('+00:00', '+0000'))
+                
+                # Parse date with proper error handling
+                try:
+                    # Handle different timezone formats
+                    normalized_date = date_str.replace('+00:00', '+0000')
+                    date_obj = datetime.fromisoformat(normalized_date)
+                except ValueError as e:
+                    logger.warning("Failed to parse date '%s' for commit %s: %s", date_str, hash_id[:8], e)
+                    # Use current date as fallback
+                    date_obj = datetime.now()
+                
                 date_key = date_obj.strftime('%Y-%m-%d')
                 
                 commit = CommitInfo(
